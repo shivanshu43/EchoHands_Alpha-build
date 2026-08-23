@@ -8,7 +8,7 @@ class SequenceDetector:
 
     def __init__(
         self,
-        start_threshold=0.035,
+        start_threshold=0.020,
         stop_threshold=0.008,
         start_frames=3,
         stop_frames=8,
@@ -34,9 +34,16 @@ class SequenceDetector:
         self.movement_counter = 0
         self.stationary_counter = 0
 
+    # ==========================================================
+    # Motion calculation
+    # ==========================================================
+
     def _calculate_motion(self, features):
 
-        if self.previous_features is None:
+        if (
+            features is None
+            or self.previous_features is None
+        ):
 
             return 0.0
 
@@ -50,15 +57,44 @@ class SequenceDetector:
             dtype=np.float32
         )
 
-        difference = np.abs(
-            current - previous
+        return float(
+            np.mean(
+                np.abs(
+                    current - previous
+                )
+            )
         )
 
-        motion = np.mean(
-            difference
-        )
+    # ==========================================================
+    # Force dynamic recording
+    #
+    # Used when RecognitionController has already confirmed
+    # that the user's motion is likely a dynamic gesture.
+    # ==========================================================
 
-        return float(motion)
+    def start_recording(self, initial_frames=None):
+
+        self.state = self.RECORDING
+
+        self.sequence = []
+
+        self.movement_counter = 0
+        self.stationary_counter = 0
+
+        if initial_frames is not None:
+
+            for frame in initial_frames:
+
+                self.sequence.append(
+                    np.asarray(
+                        frame,
+                        dtype=np.float32
+                    ).copy()
+                )
+
+    # ==========================================================
+    # Update
+    # ==========================================================
 
     def update(self, features):
 
@@ -66,7 +102,7 @@ class SequenceDetector:
         Process one frame.
 
         Returns:
-            completed_sequence when a gesture finishes.
+            completed_sequence when gesture finishes.
             None otherwise.
         """
 
@@ -80,9 +116,9 @@ class SequenceDetector:
             features
         )
 
-        # ==========================================
+        # ======================================================
         # IDLE
-        # ==========================================
+        # ======================================================
 
         if self.state == self.IDLE:
 
@@ -94,7 +130,10 @@ class SequenceDetector:
 
                 self.movement_counter = 0
 
-            if self.movement_counter >= self.start_frames:
+            if (
+                self.movement_counter
+                >= self.start_frames
+            ):
 
                 self.state = self.RECORDING
 
@@ -102,19 +141,24 @@ class SequenceDetector:
 
                 self.stationary_counter = 0
 
-                # Include the current frame
                 self.sequence.append(
-                    features
+                    np.asarray(
+                        features,
+                        dtype=np.float32
+                    ).copy()
                 )
 
-        # ==========================================
+        # ======================================================
         # RECORDING
-        # ==========================================
+        # ======================================================
 
         elif self.state == self.RECORDING:
 
             self.sequence.append(
-                features
+                np.asarray(
+                    features,
+                    dtype=np.float32
+                ).copy()
             )
 
             if motion <= self.stop_threshold:
@@ -125,21 +169,26 @@ class SequenceDetector:
 
                 self.stationary_counter = 0
 
-            # --------------------------------------
+            # --------------------------------------------------
             # Maximum sequence length
-            # --------------------------------------
+            # --------------------------------------------------
 
-            if len(self.sequence) >= self.max_sequence_frames:
+            if (
+                len(self.sequence)
+                >= self.max_sequence_frames
+            ):
 
-                completed_sequence = self.sequence
+                completed_sequence = (
+                    self.sequence.copy()
+                )
 
                 self.reset()
 
                 return completed_sequence
 
-            # --------------------------------------
-            # Movement finished
-            # --------------------------------------
+            # --------------------------------------------------
+            # Gesture stopped
+            # --------------------------------------------------
 
             if (
                 self.stationary_counter
@@ -151,7 +200,9 @@ class SequenceDetector:
                     >= self.min_sequence_frames
                 ):
 
-                    completed_sequence = self.sequence
+                    completed_sequence = (
+                        self.sequence.copy()
+                    )
 
                     self.reset()
 
@@ -161,9 +212,16 @@ class SequenceDetector:
 
                     self.reset()
 
-        self.previous_features = features
+        self.previous_features = np.asarray(
+            features,
+            dtype=np.float32
+        ).copy()
 
         return None
+
+    # ==========================================================
+    # Reset
+    # ==========================================================
 
     def reset(self):
 
@@ -177,13 +235,19 @@ class SequenceDetector:
 
         self.stationary_counter = 0
 
+    # ==========================================================
+    # Getters
+    # ==========================================================
+
     def get_state(self):
 
         return self.state
 
     def get_sequence_length(self):
 
-        return len(self.sequence)
+        return len(
+            self.sequence
+        )
 
     def get_motion(self, features):
 

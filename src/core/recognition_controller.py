@@ -6,7 +6,9 @@ from src.core.sequence_detector import SequenceDetector
 class RecognitionController:
 
     NONE = "NONE"
+    INITIALIZING = "INITIALIZING"
     STATIC = "STATIC"
+    DYNAMIC_CANDIDATE = "DYNAMIC_CANDIDATE"
     DYNAMIC = "DYNAMIC"
 
     def __init__(
@@ -14,71 +16,129 @@ class RecognitionController:
         static_predictor,
         dynamic_predictor,
         dynamic_confidence_threshold=0.85,
+
+        # Static confidence benchmark
+        static_confidence_threshold=0.75,
+
+        # Dynamic motion threshold
         movement_threshold=0.035,
-        unlock_threshold=0.035,
+
+        # Consecutive movement frames required
+        # before confirming dynamic movement
+        dynamic_start_frames=6,
+
+        # Maximum low-motion gap allowed
+        # during dynamic candidate detection
+        dynamic_gap_frames=3,
+
+        # Static prediction confirmation
         static_prediction_frames=4,
+
+        # Locked gesture release threshold
+        unlock_threshold=0.035,
+
+        # Consecutive changed frames required
+        # before unlocking a gesture
+        unlock_change_frames=5,
+
+        # Frames to ignore whenever a hand appears
+        initialization_frames=8,
     ):
 
         self.static_predictor = static_predictor
         self.dynamic_predictor = dynamic_predictor
 
-        self.sequence_detector = SequenceDetector()
+        self.sequence_detector = SequenceDetector(
+            start_threshold=movement_threshold
+        )
 
-        # ==========================================
+        # ======================================================
         # Thresholds
-        # ==========================================
+        # ======================================================
 
         self.dynamic_confidence_threshold = (
             dynamic_confidence_threshold
         )
 
-        # Movement required to start a new gesture
-        self.movement_threshold = movement_threshold
+        self.static_confidence_threshold = (
+            static_confidence_threshold
+        )
 
-        # Difference from the previously recognized
-        # gesture required to unlock NONE state
-        self.unlock_threshold = unlock_threshold
+        self.movement_threshold = (
+            movement_threshold
+        )
 
-        # Number of consecutive frames required
-        # before accepting a static prediction
+        self.dynamic_start_frames = (
+            dynamic_start_frames
+        )
+
+        self.dynamic_gap_frames = (
+            dynamic_gap_frames
+        )
+
         self.static_prediction_frames = (
             static_prediction_frames
         )
 
-        # ==========================================
-        # State
-        # ==========================================
+        self.unlock_threshold = (
+            unlock_threshold
+        )
+
+        self.unlock_change_frames = (
+            unlock_change_frames
+        )
+
+        self.initialization_frames = (
+            initialization_frames
+        )
+
+        # ======================================================
+        # Main state
+        # ======================================================
 
         self.mode = self.NONE
 
         self.previous_features = None
 
-        # ==========================================
-        # Gesture Lock
-        # ==========================================
+        # ======================================================
+        # Hand initialization
+        # ======================================================
 
-        # Stores the feature vector of the gesture
-        # that was most recently recognized.
-        #
-        # While the user keeps holding that gesture,
-        # the controller remains in NONE.
+        self.initialization_count = 0
+
+        # ======================================================
+        # Gesture locking
+        # ======================================================
+
         self.locked_features = None
 
-        # ==========================================
+        self.unlock_change_count = 0
+
+        # ======================================================
         # Static recognition tracking
-        # ==========================================
+        # ======================================================
 
         self.static_candidate = None
+
         self.static_candidate_count = 0
 
-        # ==========================================
-        # Last prediction
-        # ==========================================
+        # ======================================================
+        # Dynamic candidate tracking
+        # ======================================================
+
+        self.dynamic_motion_count = 0
+
+        self.dynamic_gap_count = 0
+
+        self.dynamic_candidate_frames = []
+
+        # ======================================================
+        # Last recognition
+        # ======================================================
 
         self.last_prediction = None
-        self.last_confidence = 0.0
 
-        self.gesture_emitted = False
+        self.last_confidence = 0.0
 
     # ==========================================================
     # Motion calculation
@@ -115,7 +175,10 @@ class RecognitionController:
     # Change from locked gesture
     # ==========================================================
 
-    def _calculate_change_from_locked(self, features):
+    def _calculate_change_from_locked(
+        self,
+        features
+    ):
 
         if (
             features is None
@@ -143,17 +206,72 @@ class RecognitionController:
         )
 
     # ==========================================================
-    # Reset current recognition attempt
+    # Reset static tracking
+    # ==========================================================
+
+    def _reset_static_tracking(self):
+
+        self.static_candidate = None
+
+        self.static_candidate_count = 0
+
+    # ==========================================================
+    # Reset dynamic candidate
+    # ==========================================================
+
+    def _reset_dynamic_candidate(self):
+
+        self.dynamic_motion_count = 0
+
+        self.dynamic_gap_count = 0
+
+        self.dynamic_candidate_frames = []
+
+    # ==========================================================
+    # Reset initialization
+    # ==========================================================
+
+    def _reset_initialization(self):
+
+        self.initialization_count = 0
+
+    # ==========================================================
+    # Reset gesture state
     # ==========================================================
 
     def _reset_gesture_state(self):
 
         self.sequence_detector.reset()
 
-        self.static_candidate = None
-        self.static_candidate_count = 0
+        self._reset_static_tracking()
 
-        self.gesture_emitted = False
+        self._reset_dynamic_candidate()
+
+        self.unlock_change_count = 0
+
+    # ==========================================================
+    # Enter initialization
+    #
+    # Called whenever a new hand enters the camera
+    # after a NO HAND state.
+    # ==========================================================
+
+    def _start_initialization(self, features):
+
+        self._reset_gesture_state()
+
+        self.locked_features = None
+
+        self.initialization_count = 1
+
+        self.mode = self.INITIALIZING
+
+        self.previous_features = (
+            np.asarray(
+                features,
+                dtype=np.float32
+            ).copy()
+        )
 
     # ==========================================================
     # Update
@@ -163,29 +281,125 @@ class RecognitionController:
 
         # ======================================================
         # NO HAND
+        #
+        # The user has removed their hand from the camera.
+        #
+        # Completely reset recognition state so that when
+        # the hand enters again, initialization starts again.
         # ======================================================
 
         if features is None:
 
             self.previous_features = None
 
-            self._reset_gesture_state()
-
-            # If the hand disappears completely,
-            # remove the previous gesture lock.
             self.locked_features = None
+
+            self._reset_initialization()
+
+            self._reset_gesture_state()
 
             self.mode = self.NONE
 
             return {
                 "prediction": None,
                 "confidence": 0.0,
-                "mode": self.mode,
+                "mode": self.NONE,
                 "sequence_complete": False,
             }
 
         # ======================================================
-        # Calculate frame-to-frame motion
+        # HAND JUST ENTERED
+        #
+        # If the previous frame had no hand, then
+        # previous_features is None.
+        #
+        # Start initialization and do not recognize anything yet.
+        # ======================================================
+
+        if (
+            self.mode == self.NONE
+            and self.previous_features is None
+        ):
+
+            self._start_initialization(
+                features
+            )
+
+            return {
+                "prediction": None,
+                "confidence": 0.0,
+                "mode": self.INITIALIZING,
+                "sequence_complete": False,
+            }
+
+        # ======================================================
+        # INITIALIZING
+        #
+        # Ignore frames while the hand enters and settles.
+        #
+        # This happens:
+        #
+        # NO HAND
+        #     ↓
+        # HAND ENTERS
+        #     ↓
+        # INITIALIZING
+        #     ↓
+        # STATIC
+        #
+        # ======================================================
+
+        if self.mode == self.INITIALIZING:
+
+            self.initialization_count += 1
+
+            self.previous_features = (
+                np.asarray(
+                    features,
+                    dtype=np.float32
+                ).copy()
+            )
+
+            if (
+                self.initialization_count
+                < self.initialization_frames
+            ):
+
+                return {
+                    "prediction": None,
+                    "confidence": 0.0,
+                    "mode": self.INITIALIZING,
+                    "sequence_complete": False,
+                }
+
+            # --------------------------------------------------
+            # Hand has settled
+            # --------------------------------------------------
+
+            self.initialization_count = 0
+
+            self._reset_static_tracking()
+
+            self._reset_dynamic_candidate()
+
+            self.previous_features = (
+                np.asarray(
+                    features,
+                    dtype=np.float32
+                ).copy()
+            )
+
+            self.mode = self.STATIC
+
+            return {
+                "prediction": None,
+                "confidence": 0.0,
+                "mode": self.STATIC,
+                "sequence_complete": False,
+            }
+
+        # ======================================================
+        # Calculate motion
         # ======================================================
 
         motion = self._calculate_motion(
@@ -195,63 +409,25 @@ class RecognitionController:
         # ======================================================
         # NONE
         #
-        # This is the gesture-lock state.
-        #
-        # If a gesture was already recognized:
-        #
-        #     recognized gesture
-        #             ↓
-        #           NONE
-        #             ↓
-        #       hold same pose
-        #             ↓
-        #           NONE
-        #
-        # Only when the pose changes enough do we unlock
-        # and allow another gesture to be recognized.
+        # Wait for a locked gesture to genuinely change.
         # ======================================================
 
         if self.mode == self.NONE:
 
             # --------------------------------------------------
-            # No gesture is currently locked
+            # No locked gesture
             # --------------------------------------------------
 
             if self.locked_features is None:
 
-                # First frame after reset
-                if self.previous_features is None:
+                self.mode = self.STATIC
 
-                    self.previous_features = features
+                self._reset_static_tracking()
 
-                    return {
-                        "prediction": None,
-                        "confidence": 0.0,
-                        "mode": self.NONE,
-                        "sequence_complete": False,
-                    }
-
-                # ----------------------------------------------
-                # Movement detected
-                # ----------------------------------------------
-
-                if motion >= self.movement_threshold:
-
-                    self.mode = self.STATIC
-
-                else:
-
-                    self.previous_features = features
-
-                    return {
-                        "prediction": None,
-                        "confidence": 0.0,
-                        "mode": self.NONE,
-                        "sequence_complete": False,
-                    }
+                self._reset_dynamic_candidate()
 
             # --------------------------------------------------
-            # A gesture is currently locked
+            # Gesture is locked
             # --------------------------------------------------
 
             else:
@@ -263,7 +439,7 @@ class RecognitionController:
                 )
 
                 # ----------------------------------------------
-                # Same gesture
+                # Same gesture or small landmark jitter
                 # ----------------------------------------------
 
                 if (
@@ -271,7 +447,14 @@ class RecognitionController:
                     < self.unlock_threshold
                 ):
 
-                    self.previous_features = features
+                    self.unlock_change_count = 0
+
+                    self.previous_features = (
+                        np.asarray(
+                            features,
+                            dtype=np.float32
+                        ).copy()
+                    )
 
                     return {
                         "prediction": None,
@@ -281,56 +464,85 @@ class RecognitionController:
                     }
 
                 # ----------------------------------------------
-                # Gesture changed
+                # Possible new gesture
+                # ----------------------------------------------
+
+                self.unlock_change_count += 1
+
+                if (
+                    self.unlock_change_count
+                    < self.unlock_change_frames
+                ):
+
+                    self.previous_features = (
+                        np.asarray(
+                            features,
+                            dtype=np.float32
+                        ).copy()
+                    )
+
+                    return {
+                        "prediction": None,
+                        "confidence": 0.0,
+                        "mode": self.NONE,
+                        "sequence_complete": False,
+                    }
+
+                # ----------------------------------------------
+                # Sustained change confirmed
                 # ----------------------------------------------
 
                 self.locked_features = None
+
+                self.unlock_change_count = 0
 
                 self._reset_gesture_state()
 
                 self.mode = self.STATIC
 
-            self.previous_features = features
-
         # ======================================================
         # STATIC
-        #
-        # Static recognition is active here.
-        #
-        # If movement becomes a dynamic sequence,
-        # switch to DYNAMIC.
         # ======================================================
 
         if self.mode == self.STATIC:
 
             # --------------------------------------------------
-            # Check for dynamic movement
+            # Significant movement detected
             # --------------------------------------------------
 
-            if motion >= self.movement_threshold:
+            if (
+                motion
+                >= self.movement_threshold
+            ):
 
-                self.sequence_detector.update(
-                    features
+                self.mode = (
+                    self.DYNAMIC_CANDIDATE
                 )
 
-                if (
-                    self.sequence_detector.get_state()
-                    == SequenceDetector.RECORDING
-                ):
+                self.dynamic_motion_count = 1
 
-                    self.mode = self.DYNAMIC
+                self.dynamic_gap_count = 0
 
-                    self.static_candidate = None
-                    self.static_candidate_count = 0
+                self.dynamic_candidate_frames = [
+                    np.asarray(
+                        features,
+                        dtype=np.float32
+                    ).copy()
+                ]
 
-                    self.previous_features = features
+                self.previous_features = (
+                    np.asarray(
+                        features,
+                        dtype=np.float32
+                    ).copy()
+                )
 
-                    return {
-                        "prediction": None,
-                        "confidence": 0.0,
-                        "mode": self.DYNAMIC,
-                        "sequence_complete": False,
-                    }
+                return {
+                    "prediction": None,
+                    "confidence": 0.0,
+                    "mode": self.DYNAMIC_CANDIDATE,
+                    "sequence_complete": False,
+                }
 
             # --------------------------------------------------
             # Static prediction
@@ -346,47 +558,53 @@ class RecognitionController:
             # Track stable prediction
             # --------------------------------------------------
 
-            if prediction == self.static_candidate:
+            if (
+                prediction
+                == self.static_candidate
+            ):
 
                 self.static_candidate_count += 1
 
             else:
 
                 self.static_candidate = prediction
+
                 self.static_candidate_count = 1
 
             self.last_prediction = prediction
+
             self.last_confidence = confidence
 
             # --------------------------------------------------
-            # Static gesture recognized
+            # Static gesture confirmed
             # --------------------------------------------------
 
             if (
                 self.static_candidate_count
                 >= self.static_prediction_frames
                 and confidence
-                >= 0.50
+                >= self.static_confidence_threshold
             ):
 
-                self.gesture_emitted = True
+                self.locked_features = (
+                    np.asarray(
+                        features,
+                        dtype=np.float32
+                    ).copy()
+                )
 
-                # ----------------------------------------------
-                # LOCK THE CURRENT POSE
-                # ----------------------------------------------
+                self.unlock_change_count = 0
 
-                self.locked_features = np.asarray(
-                    features,
-                    dtype=np.float32
-                ).copy()
-
-                # ----------------------------------------------
-                # Immediately enter NONE
-                # ----------------------------------------------
+                self._reset_dynamic_candidate()
 
                 self.mode = self.NONE
 
-                self.previous_features = features
+                self.previous_features = (
+                    np.asarray(
+                        features,
+                        dtype=np.float32
+                    ).copy()
+                )
 
                 return {
                     "prediction": prediction,
@@ -395,16 +613,107 @@ class RecognitionController:
                     "sequence_complete": False,
                 }
 
-            # --------------------------------------------------
-            # Static gesture still being evaluated
-            # --------------------------------------------------
-
-            self.previous_features = features
+            self.previous_features = (
+                np.asarray(
+                    features,
+                    dtype=np.float32
+                ).copy()
+            )
 
             return {
                 "prediction": prediction,
                 "confidence": confidence,
                 "mode": self.STATIC,
+                "sequence_complete": False,
+            }
+
+        # ======================================================
+        # DYNAMIC CANDIDATE
+        # ======================================================
+
+        if self.mode == self.DYNAMIC_CANDIDATE:
+
+            self.dynamic_candidate_frames.append(
+                np.asarray(
+                    features,
+                    dtype=np.float32
+                ).copy()
+            )
+
+            if (
+                motion
+                >= self.movement_threshold
+            ):
+
+                self.dynamic_motion_count += 1
+
+                self.dynamic_gap_count = 0
+
+            else:
+
+                self.dynamic_gap_count += 1
+
+                self.dynamic_motion_count = 0
+
+            # --------------------------------------------------
+            # Genuine dynamic movement confirmed
+            # --------------------------------------------------
+
+            if (
+                self.dynamic_motion_count
+                >= self.dynamic_start_frames
+            ):
+
+                self.sequence_detector.start_recording(
+                    self.dynamic_candidate_frames
+                )
+
+                self._reset_dynamic_candidate()
+
+                self._reset_static_tracking()
+
+                self.mode = self.DYNAMIC
+
+                self.previous_features = (
+                    np.asarray(
+                        features,
+                        dtype=np.float32
+                    ).copy()
+                )
+
+                return {
+                    "prediction": None,
+                    "confidence": 0.0,
+                    "mode": self.DYNAMIC,
+                    "sequence_complete": False,
+                }
+
+            # --------------------------------------------------
+            # Movement stopped before confirmation
+            # --------------------------------------------------
+
+            if (
+                self.dynamic_gap_count
+                >= self.dynamic_gap_frames
+            ):
+
+                self._reset_dynamic_candidate()
+
+                self._reset_static_tracking()
+
+                self.mode = self.STATIC
+
+            self.previous_features = (
+                np.asarray(
+                    features,
+                    dtype=np.float32
+                ).copy()
+            )
+
+            return {
+                "prediction": None,
+                "confidence": 0.0,
+                "mode": self.mode,
                 "sequence_complete": False,
             }
 
@@ -421,12 +730,17 @@ class RecognitionController:
             )
 
             # --------------------------------------------------
-            # Sequence still recording
+            # Still recording
             # --------------------------------------------------
 
             if completed_sequence is None:
 
-                self.previous_features = features
+                self.previous_features = (
+                    np.asarray(
+                        features,
+                        dtype=np.float32
+                    ).copy()
+                )
 
                 return {
                     "prediction": None,
@@ -456,26 +770,28 @@ class RecognitionController:
             ):
 
                 self.last_prediction = prediction
+
                 self.last_confidence = confidence
 
-                self.gesture_emitted = True
+                self.locked_features = (
+                    np.asarray(
+                        features,
+                        dtype=np.float32
+                    ).copy()
+                )
 
-                # ----------------------------------------------
-                # LOCK FINAL POSE
-                # ----------------------------------------------
+                self.unlock_change_count = 0
 
-                self.locked_features = np.asarray(
-                    features,
-                    dtype=np.float32
-                ).copy()
-
-                # ----------------------------------------------
-                # Immediately enter NONE
-                # ----------------------------------------------
+                self._reset_gesture_state()
 
                 self.mode = self.NONE
 
-                self.previous_features = features
+                self.previous_features = (
+                    np.asarray(
+                        features,
+                        dtype=np.float32
+                    ).copy()
+                )
 
                 return {
                     "prediction": prediction,
@@ -490,16 +806,19 @@ class RecognitionController:
 
             self._reset_gesture_state()
 
-            self.locked_features = None
+            self.mode = self.STATIC
 
-            self.mode = self.NONE
-
-            self.previous_features = features
+            self.previous_features = (
+                np.asarray(
+                    features,
+                    dtype=np.float32
+                ).copy()
+            )
 
             return {
                 "prediction": None,
                 "confidence": 0.0,
-                "mode": self.NONE,
+                "mode": self.STATIC,
                 "sequence_complete": False,
             }
 
@@ -509,16 +828,19 @@ class RecognitionController:
 
         self._reset_gesture_state()
 
-        self.locked_features = None
+        self.mode = self.STATIC
 
-        self.mode = self.NONE
-
-        self.previous_features = features
+        self.previous_features = (
+            np.asarray(
+                features,
+                dtype=np.float32
+            ).copy()
+        )
 
         return {
             "prediction": None,
             "confidence": 0.0,
-            "mode": self.NONE,
+            "mode": self.STATIC,
             "sequence_complete": False,
         }
 
@@ -537,6 +859,10 @@ class RecognitionController:
             .get_sequence_length()
         )
 
+    # ==========================================================
+    # Reset
+    # ==========================================================
+
     def reset(self):
 
         self.sequence_detector.reset()
@@ -547,10 +873,14 @@ class RecognitionController:
 
         self.locked_features = None
 
-        self.static_candidate = None
-        self.static_candidate_count = 0
+        self.unlock_change_count = 0
+
+        self.initialization_count = 0
+
+        self._reset_static_tracking()
+
+        self._reset_dynamic_candidate()
 
         self.last_prediction = None
-        self.last_confidence = 0.0
 
-        self.gesture_emitted = False
+        self.last_confidence = 0.0
