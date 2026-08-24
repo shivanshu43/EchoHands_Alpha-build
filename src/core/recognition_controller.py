@@ -18,7 +18,7 @@ class RecognitionController:
         dynamic_confidence_threshold=0.85,
 
         # Static confidence benchmark
-        static_confidence_threshold=0.75,
+        static_confidence_threshold=0.60,
 
         # Dynamic motion threshold
         movement_threshold=0.035,

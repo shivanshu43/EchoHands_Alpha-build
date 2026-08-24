@@ -3,7 +3,7 @@ import joblib
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.metrics import accuracy_score
 
-from src.training.dataset_loader import load_dataset
+from src.dataset.preparation.dataset_loader import load_dataset
 
 
 MODEL_PATH = "models/random_forest.pkl"

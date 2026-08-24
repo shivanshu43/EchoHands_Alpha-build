@@ -83,7 +83,7 @@ class DynamicPredictor:
 
             raise ValueError(
                 "Sequence must have shape "
-                "(frames, 42)."
+                f"(frames, {self.FEATURES_PER_FRAME})."
             )
 
         if sequence.shape[1] != self.FEATURES_PER_FRAME:

@@ -11,7 +11,7 @@ def load_dataset():
 
     dataframe = pd.read_csv(
         CSV_PATH,
-        header=None
+        header=None,
         dtype={0: str}
     )
 

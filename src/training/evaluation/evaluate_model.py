@@ -6,7 +6,7 @@ from sklearn.metrics import (
     confusion_matrix,
 )
 
-from src.training.dataset_loader import load_dataset
+from src.dataset.preparation.dataset_loader import load_dataset
 
 
 MODEL_PATH = "models/random_forest.pkl"

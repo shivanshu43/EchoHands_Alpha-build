@@ -430,10 +430,9 @@ def main():
     if len(sys.argv) != 2:
 
         print(
-            "Usage: "
-            "python -m src.training."
-            "collect_targeted_augmentation "
-            "<label>"
+            
+            "Usage: python -m src.dataset.preparation.collect_targeted_augmentation <label>"
+            
         )
 
         return

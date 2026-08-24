@@ -30,7 +30,10 @@ def main():
 
     controller = RecognitionController(
         static_predictor,
-        dynamic_predictor
+        dynamic_predictor,
+
+        # Static recognition confidence
+        static_confidence_threshold=0.60,
     )
 
     word_builder = WordBuilder()
@@ -47,7 +50,9 @@ def main():
     # Gesture emission protection
     #
     # Prevents:
+    #
     # H -> HH -> HHH -> HHHHH
+    #
     # caused by repeated predictions during
     # controller state transitions.
     # ==========================================
@@ -55,6 +60,33 @@ def main():
     gesture_consumed = False
 
     previous_mode = controller.NONE
+
+    # ==========================================
+    # Hand-entry protection
+    #
+    # Prevents accidental first gesture
+    # duplication when the hand enters:
+    #
+    # HELLO -> HHELLO
+    #
+    # Recognition remains blocked until:
+    #
+    # NO HAND
+    #    ↓
+    # HAND ENTERS
+    #    ↓
+    # INITIALIZING
+    #    ↓
+    # STATIC
+    #    ↓
+    # RECOGNITION READY
+    # ==========================================
+
+    hand_was_present = False
+
+    waiting_for_hand_initialization = False
+
+    recognition_ready = False
 
     # ==========================================
     # Space key tracking
@@ -70,13 +102,24 @@ def main():
 
     camera.start()
 
-    print("\n========== Sign Language Recognition ==========\n")
+    print(
+        "\n========== Sign Language Recognition ==========\n"
+    )
 
     print("Static gestures : A-Y + 0-9")
+
     print("Dynamic gestures: J / Z")
+
     print("Press SPACE to add a space.")
-    print("Press SPACE twice quickly to clear text.")
-    print("Press BACKSPACE to remove last character.")
+
+    print(
+        "Press SPACE twice quickly to clear text."
+    )
+
+    print(
+        "Press BACKSPACE to remove last character."
+    )
+
     print("Press 'Q' to exit.\n")
 
     try:
@@ -91,7 +134,9 @@ def main():
 
             if frame is None:
 
-                print("Failed to capture frame.")
+                print(
+                    "Failed to capture frame."
+                )
 
                 break
 
@@ -107,16 +152,60 @@ def main():
             # Extract features
             # ==========================================
 
-            features = processor.extract_features(
-                results
+            features = (
+                processor.extract_features(
+                    results
+                )
             )
+
+            # ==========================================
+            # Hand entry / exit detection
+            # ==========================================
+
+            hand_present = features is not None
+
+            # ------------------------------------------
+            # Hand just entered the frame
+            # ------------------------------------------
+
+            if (
+                hand_present
+                and not hand_was_present
+            ):
+
+                waiting_for_hand_initialization = True
+
+                recognition_ready = False
+
+                # Block any accidental gesture
+                # while the hand is entering.
+                gesture_consumed = True
+
+            # ------------------------------------------
+            # Hand left the frame
+            # ------------------------------------------
+
+            elif (
+                not hand_present
+                and hand_was_present
+            ):
+
+                waiting_for_hand_initialization = False
+
+                recognition_ready = False
+
+                gesture_consumed = False
+
+            # Update hand presence state
+            hand_was_present = hand_present
 
             # ==========================================
             # Recognition Controller
             #
             # Handles:
-            # - INITIALIZING state
+            # - hand initialization
             # - static recognition
+            # - confidence filtering
             # - jitter filtering
             # - dynamic gesture detection
             # - gesture locking
@@ -143,17 +232,55 @@ def main():
             ]
 
             # ==========================================
+            # Hand initialization completed
+            #
+            # Enable recognition only when the
+            # controller has reached STATIC state
+            # after the hand entry.
+            # ==========================================
+            if (
+                waiting_for_hand_initialization
+                and mode == controller.STATIC
+            ):
+
+                # Hand initialization is complete.
+                #
+                # The gesture currently being held is treated as the
+                # entry/initialization gesture and must not be emitted.
+                #
+                # This prevents:
+                #
+                # Hand enters with A
+                #     ↓
+                # Initialization finishes
+                #     ↓
+                # A is emitted again
+                #     ↓
+                # AA
+
+                waiting_for_hand_initialization = False
+
+                recognition_ready = True
+
+                # Consume the gesture that was already present
+                # during hand initialization.
+                gesture_consumed = True
+
+            # ==========================================
             # Reset gesture permission
             #
             # Only when the controller ENTERS NONE.
             #
-            # Do NOT reset this continuously while
+            # Do NOT reset continuously while
             # already in NONE, otherwise jitter can
-            # cause repeated letters.
+            # cause:
+            #
+            # H -> HH -> HHH
             # ==========================================
 
             if (
-                mode == controller.NONE
+                recognition_ready
+                and mode == controller.NONE
                 and previous_mode != controller.NONE
             ):
 
@@ -162,17 +289,18 @@ def main():
             # ==========================================
             # Add recognized gesture only once
             #
-            # Extra safety layer against:
+            # Extra protection against:
             #
             # H -> HH -> HHH -> HHHHH
             #
-            # The controller should already emit a
-            # confirmed gesture once, but this prevents
-            # accidental repeated WordBuilder additions.
+            # Also prevents accidental prediction
+            # during hand initialization.
             # ==========================================
 
             if (
                 prediction is not None
+                and recognition_ready
+                and not waiting_for_hand_initialization
                 and not gesture_consumed
             ):
 
@@ -182,24 +310,16 @@ def main():
 
                 gesture_consumed = True
 
+                last_prediction = prediction
+
+                last_confidence = confidence
+
             # ==========================================
-            # Save current mode
+            # Update display prediction
             #
-            # Used on the next frame to detect an
-            # actual state transition.
+            # This can display predictions without
+            # necessarily adding them to the word.
             # ==========================================
-
-            previous_mode = mode
-
-            # ==========================================
-            # Update displayed prediction
-            # ==========================================
-
-            if features is None:
-
-                last_prediction = "No Hand Detected"
-
-                last_confidence = 0.0
 
             elif prediction is not None:
 
@@ -208,7 +328,13 @@ def main():
                 last_confidence = confidence
 
             # ==========================================
-            # Draw landmarks
+            # Store current mode
+            # ==========================================
+
+            previous_mode = mode
+
+            # ==========================================
+            # Draw hand landmarks
             # ==========================================
 
             frame = detector.draw(
@@ -217,27 +343,13 @@ def main():
             )
 
             # ==========================================
-            # Mode
-            # ==========================================
-
-            cv2.putText(
-                frame,
-                f"Mode: {mode}",
-                (20, 40),
-                cv2.FONT_HERSHEY_SIMPLEX,
-                0.8,
-                (255, 255, 0),
-                2
-            )
-
-            # ==========================================
-            # Prediction
+            # Prediction display
             # ==========================================
 
             cv2.putText(
                 frame,
                 f"Prediction: {last_prediction}",
-                (20, 80),
+                (20, 40),
                 cv2.FONT_HERSHEY_SIMPLEX,
                 0.8,
                 (0, 255, 0),
@@ -245,7 +357,7 @@ def main():
             )
 
             # ==========================================
-            # Confidence
+            # Confidence display
             # ==========================================
 
             cv2.putText(
@@ -254,27 +366,45 @@ def main():
                     f"Confidence: "
                     f"{last_confidence * 100:.1f}%"
                 ),
-                (20, 120),
+                (20, 75),
                 cv2.FONT_HERSHEY_SIMPLEX,
                 0.7,
-                (0, 255, 255),
+                (0, 255, 0),
                 2
             )
 
             # ==========================================
-            # Sequence length
+            # Mode display
             # ==========================================
+
+            cv2.putText(
+                frame,
+                f"Mode: {mode}",
+                (20, 110),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.7,
+                (255, 255, 255),
+                2
+            )
+
+            # ==========================================
+            # Dynamic sequence information
+            # ==========================================
+
+            sequence_length = (
+                controller.get_sequence_length()
+            )
 
             cv2.putText(
                 frame,
                 (
                     f"Sequence frames: "
-                    f"{controller.get_sequence_length()}"
+                    f"{sequence_length}"
                 ),
-                (20, 160),
+                (20, 145),
                 cv2.FONT_HERSHEY_SIMPLEX,
-                0.7,
-                (255, 180, 0),
+                0.6,
+                (255, 255, 255),
                 2
             )
 
@@ -297,10 +427,8 @@ def main():
             # ==========================================
             # INITIALIZING state
             #
-            # Prevents first-hand-entry duplicate
-            # such as:
-            #
-            # HELLO -> HHELLO
+            # Hand has just entered the screen.
+            # Recognition is temporarily blocked.
             # ==========================================
 
             elif mode == controller.INITIALIZING:
@@ -312,6 +440,25 @@ def main():
                     cv2.FONT_HERSHEY_SIMPLEX,
                     0.7,
                     (0, 165, 255),
+                    2
+                )
+
+            # ==========================================
+            # Recognition ready state
+            # ==========================================
+
+            elif (
+                recognition_ready
+                and mode == controller.STATIC
+            ):
+
+                cv2.putText(
+                    frame,
+                    "Ready for gesture",
+                    (20, 200),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    0.7,
+                    (0, 255, 255),
                     2
                 )
 
@@ -335,39 +482,22 @@ def main():
             # Current text
             # ==========================================
 
-            current_text = word_builder.get_text()
+            current_text = (
+                word_builder.get_text()
+            )
 
             cv2.putText(
                 frame,
                 f"Text: {current_text}",
-                (20, 300),
+                (20, 285),
                 cv2.FONT_HERSHEY_SIMPLEX,
                 1.0,
-                (255, 255, 255),
+                (255, 255, 0),
                 2
             )
 
             # ==========================================
-            # Controls
-            # ==========================================
-
-            cv2.putText(
-                frame,
-                (
-                    "[SPACE] Space  "
-                    "[DOUBLE SPACE] Clear  "
-                    "[BACKSPACE] Delete  "
-                    "[Q] Quit"
-                ),
-                (20, 350),
-                cv2.FONT_HERSHEY_SIMPLEX,
-                0.55,
-                (200, 200, 200),
-                1
-            )
-
-            # ==========================================
-            # Display
+            # Show frame
             # ==========================================
 
             cv2.imshow(
@@ -381,46 +511,48 @@ def main():
 
             key = cv2.waitKey(1) & 0xFF
 
-            # ==========================================
+            # ------------------------------------------
             # Quit
-            # ==========================================
+            # ------------------------------------------
 
-            if key == ord("q"):
+            if key in [ord("q"), ord("Q")]:
 
                 break
 
-            # ==========================================
-            # Space / Double Space
-            # ==========================================
+            # ------------------------------------------
+            # SPACE
+            # ------------------------------------------
 
-            elif key == ord(" "):
+            elif key == 32:
 
                 current_time = time.time()
 
                 # --------------------------------------
                 # Double SPACE
                 #
-                # Clear entire displayed text.
+                # Current implementation:
+                # clears the complete text.
                 # --------------------------------------
 
                 if (
                     last_space_time > 0
                     and (
-                        current_time - last_space_time
+                        current_time
+                        - last_space_time
                         <= double_space_interval
                     )
                 ):
 
                     word_builder.clear()
 
-                    # Prevent a third space from being
-                    # interpreted as another double space.
+                    # Prevent another consecutive space
+                    # from being treated as double-space.
                     last_space_time = 0.0
 
                 # --------------------------------------
                 # Single SPACE
                 #
-                # Add separation for next word.
+                # Separate words.
                 # --------------------------------------
 
                 else:
@@ -429,9 +561,9 @@ def main():
 
                     last_space_time = current_time
 
-            # ==========================================
-            # Backspace
-            # ==========================================
+            # ------------------------------------------
+            # BACKSPACE
+            # ------------------------------------------
 
             elif key in [8, 127]:
 
@@ -439,9 +571,10 @@ def main():
 
                 last_space_time = 0.0
 
-            # ==========================================
-            # Any other key resets double-space timing
-            # ==========================================
+            # ------------------------------------------
+            # Any other key resets
+            # double-space timing
+            # ------------------------------------------
 
             elif key != 255:
 
