@@ -43,7 +43,8 @@ It is basically the **working foundation of EchoHands**. It contains the real-ti
 So, this isn't meant to be the final polished EchoHands experience just yet. It is the current technical build that we're using to develop and improve the system.
 
 >**Note:** The repository consisting trained **model files, datasets, source code, and other project assets** directly inside the project
->Sharing the repository publicly would make it possible for others to grab the models and a large part of the project itself — so let's not make copying the whole thing quite that easy 😅
+
+>and Sharing the repository publicly would make it possible for others to grab the models and a large part of the project itself — so let's not make copying the whole thing quite that easy 😅
 >If access to the repository is private or controlled, contributors should not redistribute the source code, datasets, or model artifacts without permission from the project owner.
 
 
@@ -1119,6 +1120,10 @@ The exact architecture is a future development goal and would require further wo
 ---
 
 # 👤 Author
+
+**Shivanshu Khode**
+
+## 👤 Author
 
 **Shivanshu Khode**
 
